@@ -280,6 +280,7 @@ buffer_to_file (struct decoder *dec, GstBuffer * buf)
   gboolean is_dmabuf_mem;
   GstMemory *mem;
   GstMapInfo map_info;
+  const char *pixfmt_str;
   gchar filename[128];
 
   /* TODO: Query gst_is_dmabuf_memory() here, since the gstmemory
@@ -288,7 +289,7 @@ buffer_to_file (struct decoder *dec, GstBuffer * buf)
   mem = gst_buffer_peek_memory (buf, 0);
 
   /* TODO: use the DMABUF directly */
-
+  /* fd = gst_dmabuf_memory_get_fd (mem); */
   gst_buffer_map (buf, &map_info, GST_MAP_READ);
 
   /* Usually, a videometa should be present, since by using the internal kmscube
@@ -318,7 +319,6 @@ buffer_to_file (struct decoder *dec, GstBuffer * buf)
   /* output some information at the beginning (= when the first frame is handled) */
   if (dec->frame == 0) {
     GstVideoFormat pixfmt;
-    const char *pixfmt_str;
 
     pixfmt = GST_VIDEO_INFO_FORMAT (&(dec->info));
     pixfmt_str = gst_video_format_to_string (pixfmt);
