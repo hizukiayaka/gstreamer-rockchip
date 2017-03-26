@@ -71,7 +71,7 @@ static GstStaticPadTemplate gst_mpp_video_dec_src_template =
         "width  = (int) [ 32, 4096 ], " "height =  (int) [ 32, 4096 ]"
         ";"
         "video/x-raw, "
-        "format = (string) P010_10LE, "
+        "format = (string) NV12_10LE40, "
         "width  = (int) [ 32, 4096 ], " "height =  (int) [ 32, 4096 ]" ";")
     );
 
@@ -121,8 +121,7 @@ mpp_frame_type_to_gst_video_format (MppFrameFormat fmt)
       return GST_VIDEO_FORMAT_NV12;
       break;
     case MPP_FMT_YUV420SP_10BIT:
-      /* FIXME it is platform special pixel format */
-      return GST_VIDEO_FORMAT_P010_10LE;
+      return GST_VIDEO_FORMAT_NV12_10LE40;
       break;
     case MPP_FMT_YUV422SP:
       return GST_VIDEO_FORMAT_NV16;
@@ -243,8 +242,7 @@ gst_mpp_video_frame_to_info (MppFrame mframe, GstVideoInfo * info)
   switch (info->finfo->format) {
     case GST_VIDEO_FORMAT_NV12:
     case GST_VIDEO_FORMAT_NV21:
-      /* FIXME: use NV12_10LE40 since 1.16 */
-    case GST_VIDEO_FORMAT_P010_10LE:
+    case GST_VIDEO_FORMAT_NV12_10LE40:
       info->stride[0] = hor_stride;
       info->stride[1] = hor_stride;
       info->offset[0] = 0;
