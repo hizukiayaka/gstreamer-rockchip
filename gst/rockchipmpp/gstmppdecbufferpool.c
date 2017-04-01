@@ -81,7 +81,7 @@ gst_mpp_dec_buffer_pool_start (GstBufferPool * bpool)
   if (count < min_buffers)
     goto no_buffers;
 
-  pool->dec->mpi->control (pool->dec->mpp_ctx, MPP_DEC_SET_EXT_BUF_GROUP,
+  gst_mpp_object_config_pool (pool->mppobject,
       (gpointer) pool->vallocator->mpp_mem_pool);
 
   pool->size = size;
@@ -159,12 +159,11 @@ gst_mpp_dec_buffer_pool_alloc_buffer (GstBufferPool * bpool,
     GstBuffer ** buffer, GstBufferPoolAcquireParams * params)
 {
   GstMppDecBufferPool *pool = GST_MPP_DEC_BUFFER_POOL (bpool);
-  GstMppVideoDec *dec = pool->dec;
   GstMemory *mem;
   GstBuffer *newbuf = NULL;
   GstVideoInfo *info;
 
-  info = &dec->info;
+  info = &pool->mppobject->info;
 
   mem = gst_mpp_allocator_alloc_dmabuf (pool->vallocator, pool->allocator);
   if (mem != NULL) {
@@ -231,55 +230,26 @@ gst_mpp_dec_buffer_pool_acquire_buffer (GstBufferPool * bpool,
     GstBuffer ** buffer, GstBufferPoolAcquireParams * params)
 {
   GstMppDecBufferPool *pool = GST_MPP_DEC_BUFFER_POOL (bpool);
-  GstMppVideoDec *dec = pool->dec;
+  GstMppObject *mppobject = pool->mppobject;
+  GstFlowReturn ret;
   GstBuffer *outbuf;
-  MppFrame mframe = NULL;
-  MppBuffer mpp_buf;
-  gint buf_index, ret, mode;
 
-  ret = dec->mpi->decode_get_frame (dec->mpp_ctx, &mframe);
-  if (ret || NULL == mframe)
-    goto mpp_error;
+  gint index;
 
-  if (mpp_frame_get_discard (mframe) || mpp_frame_get_errinfo (mframe))
-    goto drop_frame;
-  /* get from the pool the GstBuffer associated with the index */
-  mpp_buf = mpp_frame_get_buffer (mframe);
-  if (NULL == mpp_buf)
-    goto mpp_eos;
-  buf_index = mpp_buffer_get_index (mpp_buf);
-  outbuf = pool->buffers[buf_index];
+  ret = gst_mpp_object_fetch_dec_index (mppobject, &index);
+  if (ret != GST_FLOW_OK)
+    return ret;
+
+  outbuf = pool->buffers[index];
   if (outbuf == NULL)
     goto no_buffer;
+  /* TODO: set the buffer flag for the field buffer */
 
-  mode = mpp_frame_get_mode (mframe);
-  switch (mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) {
-    case MPP_FRAME_FLAG_BOT_FIRST:
-      GST_BUFFER_FLAG_SET (outbuf, GST_VIDEO_BUFFER_FLAG_INTERLACED);
-      GST_BUFFER_FLAG_UNSET (outbuf, GST_VIDEO_BUFFER_FLAG_TFF);
-      break;
-    case MPP_FRAME_FLAG_TOP_FIRST:
-      GST_BUFFER_FLAG_SET (outbuf, GST_VIDEO_BUFFER_FLAG_INTERLACED);
-      GST_BUFFER_FLAG_SET (outbuf, GST_VIDEO_BUFFER_FLAG_TFF);
-      break;
-    case MPP_FRAME_FLAG_DEINTERLACED:
-    default:
-      GST_BUFFER_FLAG_UNSET (outbuf, GST_VIDEO_BUFFER_FLAG_INTERLACED);
-      GST_BUFFER_FLAG_UNSET (outbuf, GST_VIDEO_BUFFER_FLAG_TFF);
-      break;
-  }
-  /*
-   * Increase the reference of the buffer or the destroy the mpp frame
-   * would decrease the reference and put it back to unused status
-   */
-  mpp_buffer_inc_ref (mpp_buf);
-  mpp_frame_deinit (&mframe);
-
-  pool->buffers[buf_index] = NULL;
+  pool->buffers[index] = NULL;
   g_atomic_int_add (&pool->num_queued, -1);
 
   GST_DEBUG_OBJECT (pool,
-      "acquired buffer %p, index %d, queued %d", outbuf, buf_index,
+      "acquired buffer %p , index %d, queued %d", outbuf, index,
       g_atomic_int_get (&pool->num_queued));
 
   *buffer = outbuf;
@@ -287,28 +257,12 @@ gst_mpp_dec_buffer_pool_acquire_buffer (GstBufferPool * bpool,
   return GST_FLOW_OK;
 
   /* ERRORS */
-mpp_eos:
-  {
-    GST_INFO_OBJECT (pool, "got eos or %d", ret);
-    return GST_FLOW_EOS;
-  }
-mpp_error:
-  {
-    *buffer = NULL;
-    GST_ERROR_OBJECT (pool, "mpp error %d", ret);
-    return GST_FLOW_ERROR;
-  }
 no_buffer:
   {
-    *buffer = NULL;
-    GST_ERROR_OBJECT (pool, "No free buffer found in the pool at index %d",
-        buf_index);
+    GST_ERROR_OBJECT (pool,
+        "mpp output to an occupy buffer (index %d), which is not in the pool",
+        index);
     return GST_FLOW_ERROR;
-  }
-drop_frame:
-  {
-    mpp_frame_deinit (&mframe);
-    return GST_FLOW_CUSTOM_ERROR_1;
   }
 }
 
@@ -377,8 +331,8 @@ gst_mpp_dec_buffer_pool_finalize (GObject * object)
 {
   GstMppDecBufferPool *pool = GST_MPP_DEC_BUFFER_POOL (object);
 
-  pool->dec->mpi->control (pool->dec->mpp_ctx, MPP_DEC_SET_EXT_BUF_GROUP, NULL);
-  gst_object_unref (pool->dec);
+  /* FIXME: unbinding the external buffer of the rockchip mpp */
+  gst_object_unref (pool->mppobject->element);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -386,8 +340,9 @@ gst_mpp_dec_buffer_pool_finalize (GObject * object)
 static void
 gst_mpp_dec_buffer_pool_init (GstMppDecBufferPool * pool)
 {
-  pool->dec = NULL;
+  pool->mppobject = NULL;
   pool->num_queued = 0;
+  pool->other_pool = NULL;
 }
 
 static void
@@ -422,15 +377,17 @@ gst_mpp_dec_buffer_pool_class_init (GstMppDecBufferPoolClass * klass)
  * Returns: the new pool, use gst_object_unref() to free resources
  */
 GstBufferPool *
-gst_mpp_dec_buffer_pool_new (GstMppVideoDec * dec, GstCaps * caps)
+gst_mpp_dec_buffer_pool_new (GstMppObject * obj, GstCaps * caps)
 {
   GstMppDecBufferPool *pool;
   GstStructure *config;
   gchar *name, *parent_name;
 
   /* setting a significant unique name */
-  parent_name = gst_object_get_name (GST_OBJECT (dec));
-  name = g_strconcat (parent_name, ":", "pool:", "src", NULL);
+  parent_name = gst_object_get_name (GST_OBJECT (obj->element));
+  name =
+      g_strconcat (parent_name, ":", "pool:",
+      obj->type == MPP_CTX_ENC ? "sink" : "src", NULL);
   g_free (parent_name);
 
   pool =
@@ -438,16 +395,19 @@ gst_mpp_dec_buffer_pool_new (GstMppVideoDec * dec, GstCaps * caps)
       "name", name, NULL);
   g_object_ref_sink (pool);
   g_free (name);
-
-  /* take a reference on decoder to be sure that it will be released
+  /* take a reference on mpp object to be sure that it will be released
    * after the pool */
-  pool->dec = gst_object_ref (dec);
+
+  pool->mppobject = obj;
+
+  gst_object_ref (obj->element);
+  /* The default MPP DMA Allocator */
   pool->vallocator = gst_mpp_allocator_new (GST_OBJECT (pool));
   if (!pool->vallocator)
     goto allocator_failed;
 
   config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pool));
-  gst_buffer_pool_config_set_params (config, caps, dec->info.size, 0, 0);
+  gst_buffer_pool_config_set_params (config, caps, 0, 0, 0);
   /* This will simply set a default config, but will not configure the pool
    * because min and max are not valid */
   gst_buffer_pool_set_config (GST_BUFFER_POOL_CAST (pool), config);

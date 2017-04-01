@@ -27,7 +27,7 @@
 #include <gst/video/gstvideodecoder.h>
 #include <gst/video/gstvideopool.h>
 
-#include <rockchip/rk_mpi.h>
+#include "gstmppobject.h"
 
 /* Begin Declaration */
 G_BEGIN_DECLS
@@ -40,7 +40,6 @@ G_BEGIN_DECLS
 	(G_TYPE_CHECK_INSTANCE_TYPE((obj), GST_TYPE_MPP_VIDEO_DEC))
 #define GST_IS_MPP_VIDEO_DEC_CLASS(obj) \
 	(G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_MPP_VIDEO_DEC))
-
 typedef struct _GstMppVideoDec GstMppVideoDec;
 typedef struct _GstMppVideoDecClass GstMppVideoDecClass;
 
@@ -52,21 +51,13 @@ struct _GstMppVideoDec
   gint width;
   gint height;
   gint framesize;
+  GstMppObject *mppobject;
 
   GstVideoCodecState *input_state;
-
-  /* the currently format */
-  GstVideoInfo info;
 
   /* State */
   gboolean active;
   GstFlowReturn output_flow;
-
-  /* Rockchip Mpp definitions */
-  MppCtx mpp_ctx;
-  MppApi *mpi;
-
-  GstBufferPool *pool;          /* Pool of output frames */
 };
 
 struct _GstMppVideoDecClass

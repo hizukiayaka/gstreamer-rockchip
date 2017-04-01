@@ -26,9 +26,13 @@
 #include "gstmppjpegenc.h"
 #include "gstmppvideodec.h"
 
+GST_DEBUG_CATEGORY (mpp_debug);
+#define GST_CAT_DEFAULT mpp_debug
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  GST_DEBUG_CATEGORY_INIT (mpp_debug, "mpp", 0, "MPP/MPI API calls");
   if (!gst_element_register (plugin, "mppvideodec", GST_RANK_PRIMARY + 1,
           gst_mpp_video_dec_get_type ()))
     return FALSE;

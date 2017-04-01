@@ -1,6 +1,7 @@
 plugin_LTLIBRARIES = libgstrockchipmpp.la
 
 libgstrockchipmpp_la_SOURCES =			\
+	gstmppobject.c				\
 	gstmppvideoenc.c			\
 	gstmpph264enc.c				\
 	gstmppjpegenc.c				\

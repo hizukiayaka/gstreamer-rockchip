@@ -38,9 +38,10 @@ typedef struct _GstMppDecBufferPoolClass GstMppDecBufferPoolClass;
 struct _GstMppDecBufferPool
 {
   GstBufferPool parent;
-  GstMppVideoDec *dec;
+  GstMppObject *mppobject;
 
-  guint num_queued;             /* number of buffers queued in the mpp/libvpu and gstvpudecbufferpool */
+  /* number of buffers queued in the mpp and gstmppdecbufferpool */
+  guint num_queued;
 
   guint size;
   GstBuffer *buffers[VIDEO_MAX_FRAME];
@@ -48,6 +49,7 @@ struct _GstMppDecBufferPool
   GstMppAllocator *vallocator;
   GstAllocator *allocator;
   GstAllocationParams params;
+  GstBufferPool *other_pool;
 };
 
 struct _GstMppDecBufferPoolClass
@@ -57,7 +59,7 @@ struct _GstMppDecBufferPoolClass
 
 GType gst_mpp_dec_buffer_pool_get_type (void);
 
-GstBufferPool *gst_mpp_dec_buffer_pool_new (GstMppVideoDec * dec,
+GstBufferPool *gst_mpp_dec_buffer_pool_new (GstMppObject * mppobj,
     GstCaps * caps);
 
 G_END_DECLS

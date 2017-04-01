@@ -75,102 +75,16 @@ static GstStaticPadTemplate gst_mpp_video_dec_src_template =
         "width  = (int) [ 32, 4096 ], " "height =  (int) [ 32, 4096 ]" ";")
     );
 
-static MppCodingType
-to_mpp_codec (GstStructure * s)
-{
-  if (gst_structure_has_name (s, "video/x-h264"))
-    return MPP_VIDEO_CodingAVC;
-
-  if (gst_structure_has_name (s, "video/x-h265"))
-    return MPP_VIDEO_CodingHEVC;
-
-  if (gst_structure_has_name (s, "video/x-h263"))
-    return MPP_VIDEO_CodingH263;
-
-  if (gst_structure_has_name (s, "video/mpeg")) {
-    gint mpegversion = 0;
-    if (gst_structure_get_int (s, "mpegversion", &mpegversion)) {
-      switch (mpegversion) {
-        case 1:
-        case 2:
-          return MPP_VIDEO_CodingMPEG2;
-          break;
-        case 4:
-          return MPP_VIDEO_CodingMPEG4;
-          break;
-        default:
-          break;
-      }
-    }
-  }
-
-  if (gst_structure_has_name (s, "video/x-vp8"))
-    return MPP_VIDEO_CodingVP8;
-  if (gst_structure_has_name (s, "video/x-vp9"))
-    return MPP_VIDEO_CodingVP9;
-
-  /* add more type here */
-  return MPP_VIDEO_CodingUnused;
-}
-
-static GstVideoFormat
-mpp_frame_type_to_gst_video_format (MppFrameFormat fmt)
-{
-  switch (fmt) {
-    case MPP_FMT_YUV420SP:
-      return GST_VIDEO_FORMAT_NV12;
-      break;
-    case MPP_FMT_YUV420SP_10BIT:
-      return GST_VIDEO_FORMAT_NV12_10LE40;
-      break;
-    case MPP_FMT_YUV422SP:
-      return GST_VIDEO_FORMAT_NV16;
-      break;
-    default:
-      return GST_VIDEO_FORMAT_UNKNOWN;
-      break;
-  }
-  return GST_VIDEO_FORMAT_UNKNOWN;
-}
-
-static GstVideoInterlaceMode
-mpp_frame_mode_to_gst_interlace_mode (RK_U32 mode)
-{
-  switch (mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) {
-    case MPP_FRAME_FLAG_DEINTERLACED:
-      return GST_VIDEO_INTERLACE_MODE_MIXED;
-    case MPP_FRAME_FLAG_BOT_FIRST:
-    case MPP_FRAME_FLAG_TOP_FIRST:
-      return GST_VIDEO_INTERLACE_MODE_INTERLEAVED;
-    default:
-      return GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
-  }
-}
-
-static void
-gst_mpp_video_dec_unlock (GstMppVideoDec * self)
-{
-  if (self->pool && gst_buffer_pool_is_active (self->pool))
-    gst_buffer_pool_set_flushing (self->pool, TRUE);
-}
-
-static void
-gst_mpp_video_dec_unlock_stop (GstMppVideoDec * self)
-{
-  if (self->pool && gst_buffer_pool_is_active (self->pool))
-    gst_buffer_pool_set_flushing (self->pool, FALSE);
-}
-
 static gboolean
 gst_mpp_video_dec_close (GstVideoDecoder * decoder)
 {
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  if (self->mpp_ctx != NULL) {
-    mpp_destroy (self->mpp_ctx);
-    self->mpp_ctx = NULL;
+  if (self->mppobject) {
+    gst_mpp_object_destroy (self->mppobject);
+    self->mppobject = NULL;
   }
 
-  GST_DEBUG_OBJECT (self, "Rockchip MPP context closed");
+  GST_DEBUG_OBJECT (self, "Rockchip MPP object closed");
 
   return TRUE;
 }
@@ -180,10 +94,12 @@ static gboolean
 gst_mpp_video_dec_open (GstVideoDecoder * decoder)
 {
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  if (mpp_create (&self->mpp_ctx, &self->mpi))
+
+  self->mppobject = gst_mpp_object_new (GST_ELEMENT (self), FALSE);
+  if (!self->mppobject)
     return FALSE;
 
-  GST_DEBUG_OBJECT (self, "created mpp context %p", self->mpp_ctx);
+  GST_DEBUG_OBJECT (self, "created mpp object");
   return TRUE;
 }
 
@@ -193,7 +109,7 @@ gst_mpp_video_dec_start (GstVideoDecoder * decoder)
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
 
   GST_DEBUG_OBJECT (self, "Starting");
-  gst_mpp_video_dec_unlock (self);
+  gst_mpp_object_unlock (self->mppobject);
   g_atomic_int_set (&self->active, TRUE);
   self->output_flow = GST_FLOW_OK;
 
@@ -201,95 +117,55 @@ gst_mpp_video_dec_start (GstVideoDecoder * decoder)
 }
 
 static gboolean
-gst_mpp_video_dec_sendeos (GstVideoDecoder * decoder)
+gst_mpp_video_dec_stop (GstVideoDecoder * decoder)
 {
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  MppPacket mpkt;
 
-  mpp_packet_init (&mpkt, NULL, 0);
-  mpp_packet_set_eos (mpkt);
+  GST_DEBUG_OBJECT (self, "Stopping");
 
-  self->mpi->decode_put_packet (self->mpp_ctx, mpkt);
-  mpp_packet_deinit (&mpkt);
+  /* Kill mpp output thread to stop */
+  gst_mpp_object_unlock (self->mppobject);
+  gst_mpp_object_flush (self->mppobject);
+  /* Wait for mpp output thread to stop */
+  gst_pad_stop_task (decoder->srcpad);
+
+  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+  self->output_flow = GST_FLOW_OK;
+  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+
+  /* Should have been flushed already */
+  g_assert (g_atomic_int_get (&self->active) == FALSE);
+
+  gst_mpp_object_destroy (self->mppobject);
+  self->mppobject = NULL;
+
+  if (self->input_state)
+    gst_video_codec_state_unref (self->input_state);
+
+  GST_DEBUG_OBJECT (self, "Stopped");
 
   return TRUE;
 }
 
 static gboolean
-gst_mpp_video_frame_to_info (MppFrame mframe, GstVideoInfo * info)
+gst_mpp_video_dec_flush (GstVideoDecoder * decoder)
 {
-  gsize hor_stride, ver_stride, mv_size, cr_h;
-  GstVideoFormat format;
-  GstVideoInterlaceMode mode;
+  GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
+  gboolean ret = FALSE;
 
-  if (NULL == mframe || NULL == info)
-    return FALSE;
-
-  format = mpp_frame_type_to_gst_video_format (mpp_frame_get_fmt (mframe));
-  if (format == GST_VIDEO_FORMAT_UNKNOWN)
-    return FALSE;
-  mode = mpp_frame_get_mode (mframe);
-
-  gst_video_info_init (info);
-  gst_video_info_set_format (info, format, mpp_frame_get_width (mframe),
-      mpp_frame_get_height (mframe));
-
-  info->interlace_mode = mpp_frame_mode_to_gst_interlace_mode (mode);
-
-  hor_stride = mpp_frame_get_hor_stride (mframe);
-  ver_stride = mpp_frame_get_ver_stride (mframe);
-
-  switch (info->finfo->format) {
-    case GST_VIDEO_FORMAT_NV12:
-    case GST_VIDEO_FORMAT_NV21:
-    case GST_VIDEO_FORMAT_NV12_10LE40:
-      info->stride[0] = hor_stride;
-      info->stride[1] = hor_stride;
-      info->offset[0] = 0;
-      info->offset[1] = hor_stride * ver_stride;
-      cr_h = GST_ROUND_UP_2 (ver_stride) / 2;
-      info->size = info->offset[1] + info->stride[0] * cr_h;
-      mv_size = info->size / 3;
-      info->size += mv_size;
-      break;
-    case GST_VIDEO_FORMAT_NV16:
-      info->stride[0] = hor_stride;
-      info->stride[1] = hor_stride;
-      info->offset[0] = 0;
-      info->offset[1] = hor_stride * ver_stride;
-      cr_h = GST_ROUND_UP_2 (ver_stride);
-      info->size = info->offset[1] + info->stride[0] * cr_h;
-      mv_size = info->size / 3;
-      info->size += mv_size;
-    default:
-      g_assert_not_reached ();
-      break;
+  ret = gst_mpp_object_flush (self->mppobject);
+  /* Ensure the processing thread has stopped for the reverse playback
+   * discount case */
+  if (gst_pad_get_task_state (decoder->srcpad) == GST_TASK_STARTED) {
+    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+    gst_mpp_object_unlock (self->mppobject);
+    gst_pad_stop_task (decoder->srcpad);
+    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
   }
+  self->output_flow = GST_FLOW_OK;
 
-  return TRUE;
-}
-
-static gboolean
-gst_mpp_video_acquire_frame_format (GstMppVideoDec * self)
-{
-  MPP_RET mret;
-  MppFrame mframe = NULL;
-  mret = self->mpi->decode_get_frame (self->mpp_ctx, &mframe);
-  if (mret || NULL == mframe) {
-    GST_ERROR_OBJECT (self, "can't get valid info %d", mret);
-    return FALSE;
-  }
-
-  return gst_mpp_video_frame_to_info (mframe, &self->info);
-}
-
-static gboolean
-gst_mpp_video_set_format (GstMppVideoDec * self, MppCodingType codec_format)
-{
-  if (mpp_init (self->mpp_ctx, MPP_CTX_DEC, codec_format))
-    return FALSE;
-
-  return TRUE;
+  gst_mpp_object_unlock_stop (self->mppobject);
+  return !ret;
 }
 
 static gboolean
@@ -304,8 +180,8 @@ gst_mpp_video_dec_finish (GstVideoDecoder * decoder)
   GST_DEBUG_OBJECT (self, "Finishing decoding");
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-  if (gst_mpp_video_dec_sendeos (decoder)) {
-    /* Wait for mpp output thread to stop */
+  if (gst_mpp_object_sendeos (self->mppobject)) {
+    /* Wait for src thread to stop */
     GstTask *task = decoder->srcpad->task;
     GST_OBJECT_LOCK (task);
     while (GST_TASK_STATE (task) == GST_TASK_STARTED)
@@ -318,64 +194,9 @@ gst_mpp_video_dec_finish (GstVideoDecoder * decoder)
   if (ret == GST_FLOW_FLUSHING)
     ret = self->output_flow;
 
-  GST_DEBUG_OBJECT (decoder, "Done draining buffers");
-
+  GST_DEBUG_OBJECT (self, "Finished");
 done:
   return ret;
-}
-
-static gboolean
-gst_mpp_video_dec_stop (GstVideoDecoder * decoder)
-{
-  GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-
-  GST_DEBUG_OBJECT (self, "Stopping");
-
-  /* Kill mpp output thread to stop */
-  gst_mpp_video_dec_unlock (self);
-  self->mpi->reset (self->mpp_ctx);
-  gst_pad_stop_task (decoder->srcpad);
-
-  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
-  self->output_flow = GST_FLOW_OK;
-  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-
-  /* Should have been flushed already */
-  g_assert (g_atomic_int_get (&self->active) == FALSE);
-
-  /* Release all the internal references of the buffer */
-  if (self->pool) {
-    gst_object_unref (self->pool);
-    self->pool = NULL;
-  }
-
-  if (self->input_state)
-    gst_video_codec_state_unref (self->input_state);
-
-  GST_DEBUG_OBJECT (self, "Stopped");
-
-  return TRUE;
-}
-
-static gboolean
-gst_mpp_video_dec_flush (GstVideoDecoder * decoder)
-{
-  GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  gint ret = 0;
-  ret = self->mpi->reset (self->mpp_ctx);
-
-  /* Ensure the processing thread has stopped for the reverse playback
-   * discount case */
-  if (gst_pad_get_task_state (decoder->srcpad) == GST_TASK_STARTED) {
-    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-    gst_mpp_video_dec_unlock (self);
-    gst_pad_stop_task (decoder->srcpad);
-    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
-  }
-  self->output_flow = GST_FLOW_OK;
-
-  gst_mpp_video_dec_unlock_stop (self);
-  return !ret;
 }
 
 static gboolean
@@ -383,11 +204,8 @@ gst_mpp_video_dec_set_format (GstVideoDecoder * decoder,
     GstVideoCodecState * state)
 {
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  GstStructure *structure;
 
   GST_DEBUG_OBJECT (self, "Setting format: %" GST_PTR_FORMAT, state->caps);
-
-  structure = gst_caps_get_structure (state->caps, 0);
 
   if (self->input_state) {
     GstQuery *query = gst_query_new_drain ();
@@ -399,7 +217,7 @@ gst_mpp_video_dec_set_format (GstVideoDecoder * decoder,
     self->input_state = NULL;
 
     GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-    if (gst_mpp_video_dec_sendeos (decoder)) {
+    if (gst_mpp_object_sendeos (self->mppobject)) {
       /* Wait for mpp output thread to stop */
       GstTask *task = decoder->srcpad->task;
       if (task != NULL) {
@@ -409,28 +227,19 @@ gst_mpp_video_dec_set_format (GstVideoDecoder * decoder,
         GST_OBJECT_UNLOCK (task);
       }
     }
+
     GST_VIDEO_DECODER_STREAM_LOCK (decoder);
     /* Query the downstream to release buffers from buffer pool */
     if (!gst_pad_peer_query (GST_VIDEO_DECODER_SRC_PAD (self), query))
       GST_DEBUG_OBJECT (self, "drain query failed");
     gst_query_unref (query);
 
-    gst_pad_stop_task (decoder->srcpad);
-
-    if (self->pool) {
-      self->mpi->reset (self->mpp_ctx);
-      gst_object_unref (self->pool);
-      self->pool = NULL;
-    }
+    gst_mpp_object_close_pool (self->mppobject);
+    gst_mpp_object_init (self->mppobject, state->caps);
 
     self->output_flow = GST_FLOW_OK;
   } else {
-    MppCodingType codingtype;
-    codingtype = to_mpp_codec (structure);
-    if (MPP_VIDEO_CodingUnused == codingtype)
-      goto format_error;
-
-    if (!gst_mpp_video_set_format (self, codingtype))
+    if (!gst_mpp_object_init (self->mppobject, state->caps))
       goto device_error;
   }
 
@@ -440,15 +249,9 @@ done:
   return TRUE;
 
   /* Errors */
-format_error:
-  {
-    GST_ERROR_OBJECT (self, "Unsupported format in caps: %" GST_PTR_FORMAT,
-        state->caps);
-    return FALSE;
-  }
 device_error:
   {
-    GST_ERROR_OBJECT (self, "Failed to open the device");
+    GST_ERROR_OBJECT (self, "Failed to set format of mpp");
     return FALSE;
   }
 }
@@ -459,9 +262,11 @@ gst_mpp_video_dec_loop (GstVideoDecoder * decoder)
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
   GstBuffer *buffer;
   GstVideoCodecFrame *frame;
+  GstBufferPool *pool;
   GstFlowReturn ret = GST_FLOW_OK;
 
-  ret = gst_buffer_pool_acquire_buffer (self->pool, &buffer, NULL);
+  pool = self->mppobject->pool;
+  ret = gst_buffer_pool_acquire_buffer (pool, &buffer, NULL);
   if (ret != GST_FLOW_OK && ret != GST_FLOW_CUSTOM_ERROR_1)
     goto beach;
 
@@ -501,78 +306,47 @@ gst_mpp_video_dec_handle_frame (GstVideoDecoder * decoder,
     GstVideoCodecFrame * frame)
 {
   GstMppVideoDec *self = GST_MPP_VIDEO_DEC (decoder);
-  GstBufferPool *pool = NULL;
-  GstMapInfo mapinfo = { 0, };
   GstFlowReturn ret = GST_FLOW_OK;
   gboolean processed = FALSE;
   GstBuffer *tmp;
-  MppPacket mpkt = NULL;
-  MPP_RET mret = 0;
-  GstTaskState task_state;
 
   GST_DEBUG_OBJECT (self, "Handling frame %d", frame->system_frame_number);
 
   if (G_UNLIKELY (!g_atomic_int_get (&self->active)))
     goto flushing;
 
-  if (self->pool == NULL) {
-    if (!self->input_state)
-      goto not_negotiated;
-
-    self->pool = gst_mpp_dec_buffer_pool_new (self, NULL);
-    if (!self->pool)
-      goto not_negotiated;
-  }
-
-  pool = GST_BUFFER_POOL (self->pool);
-  if (!gst_buffer_pool_is_active (pool)) {
+  if (G_UNLIKELY (!GST_MPP_IS_ACTIVE (self->mppobject))) {
     GstBuffer *codec_data;
-    gint block_flag = MPP_POLL_BLOCK;
+    GstMppReturn ret = GST_MPP_OK;
+    GstBufferPool *pool = NULL;
 
     codec_data = self->input_state->codec_data;
     if (codec_data) {
       gst_buffer_ref (codec_data);
-      gst_buffer_map (codec_data, &mapinfo, GST_MAP_READ);
-      mpp_packet_init (&mpkt, mapinfo.data, mapinfo.size);
-      mpp_packet_set_extra_data (mpkt);
 
       GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-      if (self->mpi->decode_put_packet (self->mpp_ctx, mpkt)) {
-        gst_buffer_unmap (codec_data, &mapinfo);
-        goto send_stream_error;
-      }
+      /* FIXME: send key stream */
+      ret = gst_mpp_object_send_stream (self->mppobject, codec_data);
+      if (ret != GST_MPP_OK)
+        return GST_FLOW_ERROR;
       GST_VIDEO_DECODER_STREAM_LOCK (decoder);
-
-      mpp_packet_deinit (&mpkt);
-      gst_buffer_unmap (codec_data, &mapinfo);
       gst_buffer_unref (codec_data);
     }
     codec_data = gst_buffer_ref (frame->input_buffer);
     processed = TRUE;
 
-    gst_buffer_map (codec_data, &mapinfo, GST_MAP_READ);
-    mpp_packet_init (&mpkt, mapinfo.data, mapinfo.size);
-
     GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-    do {
-      mret = self->mpi->decode_put_packet (self->mpp_ctx, mpkt);
-    } while (MPP_ERR_BUFFER_FULL == mret);
-    if (mret) {
-      gst_buffer_unmap (codec_data, &mapinfo);
-      gst_buffer_unref (codec_data);
-      goto send_stream_error;
-    }
+    /* FIXME: send key stream */
+    ret = gst_mpp_object_send_stream (self->mppobject, codec_data);
+    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+    if (ret != GST_MPP_OK)
+      return GST_FLOW_ERROR;
+    gst_mpp_object_output_block (self->mppobject, -1L);
 
-    mpp_packet_deinit (&mpkt);
-    gst_buffer_unmap (codec_data, &mapinfo);
-    gst_buffer_unref (codec_data);
-
-    self->mpi->control (self->mpp_ctx, MPP_SET_OUTPUT_BLOCK,
-        (gpointer) & block_flag);
-
-    if (gst_mpp_video_acquire_frame_format (self)) {
+    ret = gst_mpp_object_acquire_output_format (self->mppobject);
+    if (ret == GST_MPP_OK) {
       GstVideoCodecState *output_state;
-      GstVideoInfo *info = &self->info;
+      GstVideoInfo *info = &self->mppobject->info;
       GstStructure *config = gst_buffer_pool_get_config (pool);
 
       output_state =
@@ -581,18 +355,25 @@ gst_mpp_video_dec_handle_frame (GstVideoDecoder * decoder,
       output_state->info.interlace_mode = info->interlace_mode;
       gst_video_codec_state_unref (output_state);
 
+      gst_mpp_object_setup_pool (self->mppobject);
+      pool = GST_BUFFER_POOL (self->mppobject->pool);
+      if (!pool)
+        goto not_negotiated;
+
       /* NOTE: if you suffer from the reconstruction of buffer pool which slows
        * down the decoding, then don't allocate more than 10 buffers here */
       gst_buffer_pool_config_set_params (config, output_state->caps,
-          self->info.size, NB_OUTPUT_BUFS, NB_OUTPUT_BUFS);
+          self->mppobject->info.size, NB_OUTPUT_BUFS, NB_OUTPUT_BUFS);
+      gst_buffer_pool_config_set_video_alignment (config,
+          &self->mppobject->align);
 
       if (!gst_buffer_pool_set_config (pool, config))
         goto error_activate_pool;
       /* activate the pool: the buffers are allocated */
-      if (gst_buffer_pool_set_active (self->pool, TRUE) == FALSE)
+      if (gst_buffer_pool_set_active (self->mppobject->pool, TRUE) == FALSE)
         goto error_activate_pool;
 
-      self->mpi->control (self->mpp_ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
+      gst_mpp_object_info_change (self->mppobject);
     } else {
       goto not_negotiated;
     }
@@ -619,29 +400,25 @@ gst_mpp_video_dec_handle_frame (GstVideoDecoder * decoder,
   }
 
   if (!processed) {
-    gst_buffer_map (frame->input_buffer, &mapinfo, GST_MAP_READ);
-    mpp_packet_init (&mpkt, mapinfo.data, mapinfo.size);
-
+    GstMppReturn ret = GST_MPP_OK;
   retry:
     GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-    mret = self->mpi->decode_put_packet (self->mpp_ctx, mpkt);
+    ret = gst_mpp_object_send_stream (self->mppobject, frame->input_buffer);
     GST_VIDEO_DECODER_STREAM_LOCK (decoder);
 
-    if (MPP_ERR_BUFFER_FULL == mret) {
+    if (GST_MPP_BUSY == ret) {
       if (gst_pad_get_task_state (GST_VIDEO_DECODER_SRC_PAD (self)) !=
           GST_TASK_STARTED) {
         ret = self->output_flow;
-        gst_buffer_unmap (frame->input_buffer, &mapinfo);
         goto drop;
       }
       goto retry;
-    } else if (mret) {
-      gst_buffer_unmap (frame->input_buffer, &mapinfo);
-      goto send_stream_error;
+    } else if (ret != GST_MPP_OK) {
+      return GST_FLOW_ERROR;
     }
 
-    mpp_packet_deinit (&mpkt);
-    gst_buffer_unmap (frame->input_buffer, &mapinfo);
+    /* No need to keep input arround */
+    gst_buffer_replace (&frame->input_buffer, NULL);
   }
 
   /* No need to keep input arround */
@@ -680,12 +457,6 @@ not_negotiated:
     gst_video_decoder_drop_frame (decoder, frame);
     return GST_FLOW_NOT_NEGOTIATED;
   }
-send_stream_error:
-  {
-    GST_ERROR_OBJECT (self, "send packet failed %d", mret);
-    mpp_packet_deinit (&mpkt);
-    return GST_FLOW_ERROR;
-  }
 drop:
   {
     GST_ERROR_OBJECT (self, "can't process this frame");
@@ -703,7 +474,7 @@ gst_mpp_video_dec_sink_event (GstVideoDecoder * decoder, GstEvent * event)
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_FLUSH_START:
       GST_DEBUG_OBJECT (self, "flush start");
-      gst_mpp_video_dec_unlock (self);
+      gst_mpp_object_sendeos (self->mppobject);
       break;
     default:
       break;
@@ -731,8 +502,8 @@ gst_mpp_video_dec_change_state (GstElement * element, GstStateChange transition)
 
   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
     g_atomic_int_set (&self->active, FALSE);
-    gst_mpp_video_dec_sendeos (decoder);
-    gst_mpp_video_dec_unlock (self);
+    gst_mpp_object_sendeos (self->mppobject);
+    gst_mpp_object_unlock (self->mppobject);
     gst_pad_stop_task (decoder->srcpad);
   }
 
@@ -783,7 +554,6 @@ gst_mpp_video_dec_init (GstMppVideoDec * self)
 
   gst_video_decoder_set_packetized (decoder, TRUE);
 
-  self->active = FALSE;
-
   self->input_state = NULL;
+  self->mppobject = NULL;
 }
