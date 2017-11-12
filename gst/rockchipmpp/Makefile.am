@@ -5,7 +5,6 @@ libgstrockchipmpp_la_SOURCES =			\
 	gstmppvideoenc.c			\
 	gstmpph264enc.c				\
 	gstmppjpegenc.c				\
-	gstmppdecbufferpool.c			\
 	gstmppbufferpool.c			\
 	gstmppallocator.c			\
 	gstmppvideodec.c			\
@@ -42,7 +41,7 @@ noinst_HEADERS =				\
 	gstmppvideoenc.h			\
 	gstmpph264enc.h				\
 	gstmppjpegenc.h				\
-	gstmppdecbufferpool.h			\
+	gstmppbufferpool.h			\
 	gstmppallocator.h			\
 	gstmppvideodec.h			\
 	$(NULL)
