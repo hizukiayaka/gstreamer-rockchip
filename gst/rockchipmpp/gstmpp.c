@@ -24,7 +24,6 @@
 #include <string.h>
 #include "gstmpph264enc.h"
 #include "gstmppjpegenc.h"
-#include "gstmppjpegdec.h"
 #include "gstmppvideodec.h"
 
 static gboolean
@@ -40,10 +39,6 @@ plugin_init (GstPlugin * plugin)
 
   if (!gst_element_register (plugin, "mppjpegenc", GST_RANK_PRIMARY,
           gst_mpp_jpeg_enc_get_type ()))
-    return FALSE;
-
-  if (!gst_element_register (plugin, "mppjpegdec", GST_RANK_PRIMARY,
-          gst_mpp_jpeg_dec_get_type ()))
     return FALSE;
 
   return TRUE;
