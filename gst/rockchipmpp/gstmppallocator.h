@@ -19,16 +19,15 @@
  *
  */
 
-#ifndef _GST_MPP_MEMORY_H
-#define _GST_MPP_MEMORY_H
-
-#include <gst/allocators/gstdmabuf.h>
-#include <rockchip/rk_mpi.h>
+#ifndef __GST_MPP_ALLOCATOR_H__
+#define __GST_MPP_ALLOCATOR_H__
 
 #include "gstmppobject.h"
 
 G_BEGIN_DECLS
+
 #define	VIDEO_MAX_FRAME	32
+
 #define GST_MPP_MEMORY_QUARK gst_mpp_memory_quark ()
 #define GST_TYPE_MPP_ALLOCATOR            (gst_mpp_allocator_get_type())
 #define GST_IS_MPP_ALLOCATOR(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_MPP_ALLOCATOR))
@@ -87,12 +86,13 @@ gst_mpp_allocator_start (GstMppAllocator * allocator, guint32 count,
 
 gint gst_mpp_allocator_stop (GstMppAllocator * allocator);
 
-GstMemory *
-gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
+GstMppMemory *
+gst_mpp_allocator_import_dmabuf (GstMppAllocator * allocator,
     GstMemory ** dma_mem, gint n_mem);
 
-GstMemory *gst_mpp_allocator_alloc_dmabuf (GstMppAllocator * allocator,
-    GstAllocator * dmabuf_allocator);
+GstMemory *
+gst_mpp_allocator_alloc_dmabuf (GstAllocator * dmabuf_allocator,
+    GstMppMemory *mem);
 
 gboolean
 gst_mpp_allocator_qbuf (GstMppAllocator * allocator, GstMppMemory * mem);

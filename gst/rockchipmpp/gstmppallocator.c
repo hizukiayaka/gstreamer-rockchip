@@ -29,6 +29,7 @@
 
 #include <gst/gst-i18n-plugin.h>
 #include <gst/allocators/gstdmabuf.h>
+#include <unistd.h>
 
 #include "gstmppallocator.h"
 
@@ -229,8 +230,8 @@ gst_mpp_allocator_new (GstObject * parent, GstMppObject * mppobject)
   return allocator;
 }
 
-GstMemory *
-gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
+GstMppMemory *
+gst_mpp_allocator_import_dmabuf (GstMppAllocator * allocator,
     GstMemory ** dma_mem, gint n_mem)
 {
   guint i;
@@ -239,12 +240,11 @@ gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
     goto n_mem_missmatch;
 
   for (i = 0; i < n_mem; i++) {
-    gint dmafd;
-    gint index;
-    gsize size, offset, maxsize;
     MppBuffer mpp_buf = NULL;
     MppBufferInfo commit = { 0, };
     GstMppMemory *mem = NULL;
+    gsize size, offset, maxsize;
+    gint dmafd, index;
 
     if (!gst_is_dmabuf_memory (dma_mem[i]))
       goto not_dmabuf;
@@ -267,7 +267,7 @@ gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
      * After this function return success, the inc_buffer_ref_no_lock()
      * in mpp_buffer_create() would increase the internal buffer reference
      * count and remove it from group, remember to put it back to group
-     * before use
+     * before future usage
      */
     if (mpp_buffer_import_with_tag (allocator->mpp_mem_pool, &commit,
             &mpp_buf, NULL, __FUNCTION__)) {
@@ -283,10 +283,7 @@ gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
     allocator->mems[allocator->count] = mem;
     allocator->count++;
 
-    gst_mini_object_set_qdata (GST_MINI_OBJECT (dma_mem[i]),
-        GST_MPP_MEMORY_QUARK, mem, (GDestroyNotify) gst_memory_unref);
-
-    return dma_mem[i];
+    return mem;
   }
 
 n_mem_missmatch:
@@ -308,20 +305,13 @@ dup_failed:
 }
 
 GstMemory *
-gst_mpp_allocator_alloc_dmabuf (GstMppAllocator * allocator,
-    GstAllocator * dmabuf_allocator)
+gst_mpp_allocator_alloc_dmabuf (GstAllocator * dmabuf_allocator,
+    GstMppMemory * mem)
 {
-  GstMppMemory *mem;
   GstMemory *dma_mem;
 
-  mem = gst_atomic_queue_pop (allocator->free_queue);
-  if (mem == NULL)
-    return NULL;
-
   if (mem->dmafd < 0) {
-    GST_ERROR_OBJECT (allocator, "Failed to get dmafd");
-    gst_atomic_queue_push (allocator->free_queue, mem);
-
+    GST_ERROR_OBJECT (dmabuf_allocator, "Failed to get dmafd");
     return NULL;
   }
 
