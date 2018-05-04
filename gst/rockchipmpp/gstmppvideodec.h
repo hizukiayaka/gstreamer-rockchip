@@ -51,7 +51,8 @@ struct _GstMppVideoDec
   gint width;
   gint height;
   gint framesize;
-  GstMppObject *mppobject;
+  GstMppObject *mpp_input;
+  GstMppObject *mpp_output;
 
   GstVideoCodecState *input_state;
 
