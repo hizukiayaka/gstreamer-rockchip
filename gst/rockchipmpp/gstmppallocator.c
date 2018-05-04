@@ -27,6 +27,7 @@
 # define _GNU_SOURCE            /* O_CLOEXEC */
 #endif
 
+#include <gst/gst-i18n-plugin.h>
 #include <gst/allocators/gstdmabuf.h>
 
 #include "gstmppallocator.h"
@@ -70,7 +71,7 @@ _mppmem_new (GstMemoryFlags flags, GstAllocator * allocator,
   mem->data = data;
   mem->dmafd = dmafd;
   mem->mpp_buf = mpp_buf;
-  mem->size = maxsize;
+  mem->index = mpp_buffer_get_index (mpp_buf);
 
   return mem;
 }
@@ -129,7 +130,7 @@ _mppmem_is_span (GstMppMemory * mem1, GstMppMemory * mem2, gsize * offset)
 }
 
 /*
- * GstVpuAllocator Implementation
+ * GstMppAllocator Implementation
  */
 
 /* Auto clean up methods */
@@ -154,6 +155,7 @@ gst_mpp_allocator_finalize (GObject * obj)
   }
 
   gst_atomic_queue_unref (allocator->free_queue);
+  gst_object_unref (allocator->obj->element);
 
   G_OBJECT_CLASS (parent_class)->finalize (obj);
 }
@@ -208,6 +210,103 @@ gst_mpp_allocator_free (GstAllocator * gallocator, GstMemory * gmem)
   _mppmem_free (mem);
 }
 
+GstMppAllocator *
+gst_mpp_allocator_new (GstObject * parent, GstMppObject * mppobject)
+{
+  GstMppAllocator *allocator = NULL;
+  gchar *name, *parent_name;
+
+  parent_name = gst_object_get_name (parent);
+  name = g_strconcat (parent_name, ":allocator", NULL);
+  g_free (parent_name);
+
+  allocator = g_object_new (GST_TYPE_MPP_ALLOCATOR, "name", name, NULL);
+  g_free (name);
+
+  allocator->obj = mppobject;
+  gst_object_ref (allocator->obj->element);
+
+  return allocator;
+}
+
+GstMemory *
+gst_mpp_allocator_alloc_dmabuf_import (GstMppAllocator * allocator,
+    GstMemory ** dma_mem, gint n_mem)
+{
+  guint i;
+
+  if (n_mem > 1)
+    goto n_mem_missmatch;
+
+  for (i = 0; i < n_mem; i++) {
+    gint dmafd;
+    gint index;
+    gsize size, offset, maxsize;
+    MppBuffer mpp_buf = NULL;
+    MppBufferInfo commit = { 0, };
+    GstMppMemory *mem = NULL;
+
+    if (!gst_is_dmabuf_memory (dma_mem[i]))
+      goto not_dmabuf;
+
+    size = gst_memory_get_sizes (dma_mem[i], &offset, &maxsize);
+    index = allocator->count;
+
+    if ((dmafd = dup (gst_dmabuf_memory_get_fd (dma_mem[i]))) < 0)
+      goto dup_failed;
+
+    GST_LOG_OBJECT (allocator, "imported DMABUF as fd %i buffer %d", dmafd,
+        index);
+
+    commit.type = MPP_BUFFER_TYPE_EXT_DMA;
+    commit.fd = dmafd;
+    commit.size = size;
+    commit.index = index;
+
+    /*
+     * After this function return success, the inc_buffer_ref_no_lock()
+     * in mpp_buffer_create() would increase the internal buffer reference
+     * count and remove it from group, remember to put it back to group
+     * before use
+     */
+    if (mpp_buffer_import_with_tag (allocator->mpp_mem_pool, &commit,
+            &mpp_buf, NULL, __FUNCTION__)) {
+      GST_ERROR_OBJECT (allocator, "commit buffer %d failed", index);
+      return FALSE;
+    }
+
+    mem = _mppmem_new (0, GST_ALLOCATOR (allocator), NULL,
+        mpp_buffer_get_size (mpp_buf), 0, 0, mpp_buffer_get_size (mpp_buf),
+        NULL, mpp_buffer_get_fd (mpp_buf), mpp_buf);
+
+    gst_atomic_queue_push (allocator->free_queue, mem);
+    allocator->mems[allocator->count] = mem;
+    allocator->count++;
+
+    gst_mini_object_set_qdata (GST_MINI_OBJECT (dma_mem[i]),
+        GST_MPP_MEMORY_QUARK, mem, (GDestroyNotify) gst_memory_unref);
+
+    return dma_mem[i];
+  }
+
+n_mem_missmatch:
+  {
+    GST_ERROR_OBJECT (allocator, "Got %i dmabuf but needed", n_mem);
+    return NULL;
+  }
+not_dmabuf:
+  {
+    GST_ERROR_OBJECT (allocator, "Memory is not of DMABUF");
+    return NULL;
+  }
+dup_failed:
+  {
+    GST_ERROR_OBJECT (allocator, "Failed to dup DMABUF descriptor: %s",
+        g_strerror (errno));
+    return FALSE;
+  }
+}
+
 GstMemory *
 gst_mpp_allocator_alloc_dmabuf (GstMppAllocator * allocator,
     GstAllocator * dmabuf_allocator)
@@ -227,27 +326,65 @@ gst_mpp_allocator_alloc_dmabuf (GstMppAllocator * allocator,
   }
 
   dma_mem = gst_dmabuf_allocator_alloc (dmabuf_allocator, mem->dmafd,
-      mem->size);
+      mem->mem.size);
   gst_mini_object_set_qdata (GST_MINI_OBJECT (dma_mem),
       GST_MPP_MEMORY_QUARK, mem, (GDestroyNotify) gst_memory_unref);
 
   return dma_mem;
 }
 
-GstMppAllocator *
-gst_mpp_allocator_new (GstObject * parent)
+static guint
+gst_mpp_allocator_ion_buf (GstMppAllocator * allocator, gsize size,
+    guint32 count)
 {
-  GstMppAllocator *allocator = NULL;
-  gchar *name, *parent_name;
+  MppBufferGroup group;
+  MppBuffer temp_buf[VIDEO_MAX_FRAME];
 
-  parent_name = gst_object_get_name (parent);
-  name = g_strconcat (parent_name, ":allocator", NULL);
-  g_free (parent_name);
+  mpp_buffer_group_get_internal (&group, MPP_BUFFER_TYPE_ION);
 
-  allocator = g_object_new (GST_TYPE_MPP_ALLOCATOR, "name", name, NULL);
-  g_free (name);
+  for (gint i = 0; i < count; i++) {
+    /*
+     * Create MppBuffer from Rockchip Mpp
+     * included mvc data
+     */
+    if (mpp_buffer_get (group, &temp_buf[i], size)) {
+      GST_ERROR_OBJECT (allocator, "allocate internal buffer %d failed", i);
+      goto error;
+    }
+  }
 
-  return allocator;
+  for (gint i = 0; i < count; i++) {
+    MppBuffer mpp_buf;
+    GstMppMemory *mem = NULL;
+    GstMemory *dma_mem = NULL;
+
+    mpp_buf = temp_buf[i];
+
+    dma_mem = gst_dmabuf_allocator_alloc (GST_ALLOCATOR_CAST (allocator),
+        mpp_buffer_get_fd (mpp_buf), mpp_buffer_get_size (mpp_buf));
+
+#if 0
+    gst_mpp_allocator_import_dmabuf (allocator, dma_mem, mem);
+#endif
+
+    /*
+     * TODO: if the external buffer pool uses the dup(),
+     * keep the following sentence
+     */
+    mpp_buffer_put (mpp_buf);
+    gst_object_unref (dma_mem);
+
+    allocator->mems[i] = mem;
+  }
+
+  mpp_buffer_group_put (group);
+  return allocator->count;
+
+error:
+  {
+    allocator->count = 0;
+    return 0;
+  }
 }
 
 static guint
@@ -257,12 +394,7 @@ gst_mpp_allocator_drm_buf (GstMppAllocator * allocator, gsize size,
   MppBufferGroup group;
   MppBuffer temp_buf[VIDEO_MAX_FRAME];
 
-  /* FIXME the rockchip mpp should support DRM type properly */
-  mpp_buffer_group_get_internal (&group, MPP_BUFFER_TYPE_ION);
-
-  mpp_buffer_group_get_external (&allocator->mpp_mem_pool, MPP_BUFFER_TYPE_ION);
-  if (allocator->mpp_mem_pool == NULL)
-    goto mpp_mem_pool_error;
+  mpp_buffer_group_get_internal (&group, MPP_BUFFER_TYPE_DRM);
 
   /* Create DRM buffer from rockchip mpp internally */
   for (gint i = 0; i < count; i++) {
@@ -278,44 +410,31 @@ gst_mpp_allocator_drm_buf (GstMppAllocator * allocator, gsize size,
 
   for (gint i = 0; i < count; i++) {
     MppBuffer mpp_buf;
-    MppBufferInfo commit;
+    GstMppMemory *mem = NULL;
+    GstMemory *dma_mem = NULL;
 
     mpp_buf = temp_buf[i];
-    mpp_buffer_set_index (mpp_buf, i);
-    mpp_buffer_info_get (mpp_buf, &commit);
 
-    if (mpp_buffer_commit (allocator->mpp_mem_pool, &commit)) {
-      GST_DEBUG_OBJECT (allocator, "commit buffer %d failed", i);
-      continue;
-    }
+    dma_mem = gst_dmabuf_allocator_alloc (GST_ALLOCATOR_CAST (allocator),
+        mpp_buffer_get_fd (mpp_buf), mpp_buffer_get_size (mpp_buf));
 
+#if 0
+    gst_mpp_allocator_import_dmabuf (allocator, dma_mem, mem);
+#endif
+
+    /*
+     * TODO: if the external buffer pool uses the dup(),
+     * keep the following sentence
+     */
     mpp_buffer_put (mpp_buf);
-    /* Remember to release the reference of this buffer */
-    if (!mpp_buffer_get (allocator->mpp_mem_pool, &mpp_buf, size)) {
+    gst_object_unref (dma_mem);
 
-      allocator->mems[i] = _mppmem_new (0, GST_ALLOCATOR (allocator), NULL,
-          mpp_buffer_get_size (mpp_buf), 0, 0, mpp_buffer_get_size (mpp_buf),
-          NULL, mpp_buffer_get_fd (mpp_buf), mpp_buf);
-
-    }
-    if (gst_is_mpp_memory ((GstMemory *) allocator->mems[i])) {
-      gst_atomic_queue_push (allocator->free_queue, allocator->mems[i]);
-      allocator->count++;
-    } else {
-      GST_ERROR_OBJECT (allocator, "allocate buffer %d failed",
-          mpp_buffer_get_index (mpp_buf));
-      goto error;
-    }
+    allocator->mems[i] = mem;
   }
 
   mpp_buffer_group_put (group);
-  return (gst_atomic_queue_length (allocator->free_queue));
+  return allocator->count;
 
-mpp_mem_pool_error:
-  {
-    GST_ERROR_OBJECT (allocator, "failed to create mpp memory pool");
-    goto error;
-  }
 error:
   {
     allocator->count = 0;
@@ -323,24 +442,135 @@ error:
   }
 }
 
-guint
-gst_mpp_allocator_start (GstMppAllocator * allocator, gsize size, guint32 count)
+gboolean
+gst_mpp_allocator_qbuf (GstMppAllocator * allocator, GstMppMemory * mem)
 {
+  gboolean ret = TRUE;
+  g_return_val_if_fail (g_atomic_int_get (&allocator->active), GST_FLOW_ERROR);
+
+  gst_memory_ref (&mem->mem);
+  /* Release the internal refcount in mpp */
+  if (mpp_buffer_put (mem->mpp_buf)) {
+    GST_ERROR_OBJECT (allocator, "failed queueing buffer %i: %s",
+        mem->index, g_strerror (errno));
+    gst_memory_unref (&mem->mem);
+    ret = FALSE;
+    goto done;
+  }
+
+  GST_LOG_OBJECT (allocator, "queued buffer %i", mem->index);
+done:
+  return ret;
+}
+
+GstFlowReturn
+gst_mpp_allocator_dqbuf (GstMppAllocator * allocator, GstMppMemory ** mem_out)
+{
+  GstMppObject *obj = NULL;
+  GstMppMemory *mem = NULL;
+  GstFlowReturn res;
+  MppFrame mframe = NULL;
+  MppBuffer mpp_buf = NULL;
+  gint index;
+
+  g_return_val_if_fail (g_atomic_int_get (&allocator->active), GST_FLOW_ERROR);
+  obj = allocator->obj;
+
+  /* FIXME only work for decoder */
+  res = gst_mpp_object_dec_frame (obj, &mframe);
+  if (res != GST_FLOW_OK)
+    goto done;
+
+  if (mpp_frame_get_eos (mframe))
+    res = GST_FLOW_EOS;
+
+  mpp_buf = mpp_frame_get_buffer (mframe);
+  if (!mpp_buf) {
+    GST_INFO_OBJECT (allocator, "got eos frame");
+    return GST_FLOW_EOS;
+  }
+
+  /* TODO: may be re-used for encoder */
+  index = mpp_buffer_get_index (mpp_buf);
+  if (index < 0)
+    goto no_buffer;
+
+  mem = allocator->mems[index];
+  if (mem == NULL) {
+    GST_ERROR_OBJECT (allocator, "buffer %i was not queued", index);
+    return GST_FLOW_ERROR;
+  }
+  mpp_buffer_inc_ref (mpp_buf);
+  /* TODO: may be re-used for encoder */
+  mem->data = mframe;
+
+  gst_memory_ref (&(mem->mem));
+  *mem_out = mem;
+
+done:
+  return res;
+  /* ERRORS */
+no_buffer:
+  {
+    GST_ERROR_OBJECT (allocator, "No free buffer found in the pool at index %d",
+        index);
+    return GST_FLOW_ERROR;
+  }
+}
+
+guint
+gst_mpp_allocator_start (GstMppAllocator * allocator, guint32 count,
+    guint32 memory)
+{
+  guint size = 0;
+
   g_return_val_if_fail (count != 0, 0);
-  g_return_val_if_fail (size != 0, 0);
 
   GST_OBJECT_LOCK (allocator);
+  size = GST_MPP_SIZE (allocator->obj);
+
   if (g_atomic_int_get (&allocator->active))
     goto already_active;
 
-  gst_mpp_allocator_drm_buf (allocator, size, count);
+  switch (memory) {
+    case GST_MPP_IO_ION:
+      mpp_buffer_group_get_external (&allocator->mpp_mem_pool,
+          MPP_BUFFER_TYPE_ION);
+      if (allocator->mpp_mem_pool == NULL)
+        goto mpp_mem_pool_error;
+
+      gst_mpp_allocator_ion_buf (allocator, size, count);
+      break;
+    case GST_MPP_IO_DRMBUF:
+      mpp_buffer_group_get_external (&allocator->mpp_mem_pool,
+          MPP_BUFFER_TYPE_DRM);
+      if (allocator->mpp_mem_pool == NULL)
+        goto mpp_mem_pool_error;
+
+      gst_mpp_allocator_drm_buf (allocator, size, count);
+      break;
+    case GST_MPP_IO_DMABUF_IMPORT:
+      mpp_buffer_group_get_external (&allocator->mpp_mem_pool,
+          MPP_BUFFER_TYPE_EXT_DMA);
+      if (allocator->mpp_mem_pool == NULL)
+        goto mpp_mem_pool_error;
+      g_atomic_int_set (&allocator->active, TRUE);
+      GST_OBJECT_UNLOCK (allocator);
+
+      return count;
+      break;
+  }
 
   g_atomic_int_set (&allocator->active, TRUE);
-
 done:
   GST_OBJECT_UNLOCK (allocator);
 
   return (gst_atomic_queue_length (allocator->free_queue));
+mpp_mem_pool_error:
+  {
+    GST_ERROR_OBJECT (allocator, "failed to create mpp memory pool");
+    goto error;
+  }
 already_active:
   {
     GST_ERROR_OBJECT (allocator, "allocator already active");
