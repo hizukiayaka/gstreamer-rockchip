@@ -91,8 +91,12 @@ gst_mpp_allocator_import_dmabuf (GstMppAllocator * allocator,
     GstMemory ** dma_mem, gint n_mem);
 
 GstMemory *
-gst_mpp_allocator_alloc_dmabuf (GstAllocator * dmabuf_allocator,
+gst_mpp_allocator_export_dmabuf (GstAllocator * dmabuf_allocator,
     GstMppMemory *mem);
+
+GstMemory *
+gst_mpp_allocator_alloc_dmabuf (GstMppAllocator * allocator,
+    GstAllocator * dmabuf_allocator);
 
 gboolean
 gst_mpp_allocator_qbuf (GstMppAllocator * allocator, GstMppMemory * mem);
