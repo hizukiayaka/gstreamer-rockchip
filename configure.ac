@@ -10,7 +10,7 @@ AC_INIT([GStreamer Plug-ins], [1.12.0], [https://github.com/rockchip-linux/gstre
 AG_GST_INIT
 
 dnl initialize automake
-AM_INIT_AUTOMAKE([-Wno-portability 1.14 no-dist-gzip dist-xz tar-ustar subdir-objects])
+AM_INIT_AUTOMAKE([-Wno-portability no-dist-gzip dist-xz tar-ustar subdir-objects])
 
 dnl define PACKAGE_VERSION_* variables
 AS_VERSION
@@ -382,22 +382,22 @@ dnl *** output files ***
 
 dnl *** rockchip mpp ***
 translit(dnm, m, l) AM_CONDITIONAL(USE_ROCKCHIPMPP, true)
-AG_GST_CHECK_FEATURE(ROCKCHIPMPP, [rockchip mpp libraries], rockchipmpp, [
-  PKG_CHECK_MODULES([ROCKCHIP_MPP], [rockchip_mpp >= 1.3.0],
+AG_GST_CHECK_FEATURE(ROCKCHIPMPP, [rockchip mpp plugins], rockchipmpp, [
+  PKG_CHECK_MODULES([ROCKCHIP_MPP], [rockchip_mpp >= 1.3.8],
     HAVE_ROCKCHIPMPP=yes, HAVE_ROCKCHIPMPP=no)
 ])
 
 dnl *** rockchip vpu dec ***
 translit(dnm, m, l) AM_CONDITIONAL(USE_VPUDEC, true)
-AG_GST_CHECK_FEATURE(VPUDEC, [rockchip vpu legacy libraries], vpudec, [
+AG_GST_CHECK_FEATURE(VPUDEC, [rockchip vpu legacy plugins], vpudec, [
   PKG_CHECK_MODULES([ROCKCHIP_VPU], [rockchip_vpu < 0.3.0],
     HAVE_VPUDEC=yes, HAVE_VPUDEC=no)
-])
+], disabled)
 
 translit(dnm, m, l) AM_CONDITIONAL(USE_RKXIMAGE, true)
 AG_GST_CHECK_FEATURE(RKXIMAGE, [drm/kms and x11 libraries], rkximage, [
   PKG_CHECK_MODULES([RKXIMAGE], [x11 libdrm], HAVE_RKXIMAGE=yes, HAVE_RKXIMAGE=no)
-])
+], disabled)
 
 dnl keep this alphabetic per directory, please
 AC_CONFIG_FILES(
