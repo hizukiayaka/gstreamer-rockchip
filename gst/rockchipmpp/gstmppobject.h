@@ -28,7 +28,7 @@
 
 #include <rockchip/rk_mpi.h>
 
-#define GST_MPP_MIN_BUFFERS     16
+#define GST_MPP_MIN_BUFFERS     2
 
 G_BEGIN_DECLS
 typedef struct _GstMppObject GstMppObject;
@@ -101,6 +101,10 @@ struct _GstMppObject
 
   /* State */
   gboolean active;
+
+  /* This will be set if supported in decide_allocation. It can be used to
+   * calculate the minimum latency. */
+  guint32 min_buffers;
 
   /* Pool of the object */
   GstMppIOMode req_mode;

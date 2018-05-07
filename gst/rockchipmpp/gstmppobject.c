@@ -158,15 +158,16 @@ mpp_frame_mode_to_gst_interlace_mode (RK_U32 mode)
 
 static gboolean
 gst_mpp_video_frame_to_info (MppFrame mframe, GstVideoInfo * info,
-    GstVideoInfo * align_info)
+    gboolean * need_video_meta, GstVideoInfo * align_info)
 {
-  gsize hor_stride, ver_stride;
+  gsize hor_stride, ver_stride, offs;
   gsize width, height, mv_size, cr_h;
   GstVideoFormat format;
   GstVideoInterlaceMode mode;
 
-  if (NULL == mframe || NULL == info)
-    return FALSE;
+  g_return_val_if_fail (info != NULL, FALSE);
+  g_return_val_if_fail (mframe != NULL, FALSE);
+  g_return_val_if_fail (need_video_meta != NULL, FALSE);
 
   format = mpp_frame_type_to_gst_video_format (mpp_frame_get_fmt (mframe));
   if (format == GST_VIDEO_FORMAT_UNKNOWN)
@@ -182,6 +183,9 @@ gst_mpp_video_frame_to_info (MppFrame mframe, GstVideoInfo * info,
   hor_stride = mpp_frame_get_hor_stride (mframe);
   ver_stride = mpp_frame_get_ver_stride (mframe);
 
+  if (info->stride[0] != hor_stride)
+    *need_video_meta = TRUE;
+
   switch (info->finfo->format) {
     case GST_VIDEO_FORMAT_NV12:
     case GST_VIDEO_FORMAT_NV21:
@@ -189,8 +193,30 @@ gst_mpp_video_frame_to_info (MppFrame mframe, GstVideoInfo * info,
       info->stride[0] = hor_stride;
       info->stride[1] = hor_stride;
       info->offset[0] = 0;
-      info->offset[1] = hor_stride * ver_stride;
+
+      offs = hor_stride * ver_stride;
+      if (info->offset[1] != offs) {
+        *need_video_meta = TRUE;
+        info->offset[1] = offs;
+      }
+
       cr_h = GST_ROUND_UP_2 (ver_stride) / 2;
+      info->size = info->offset[1] + info->stride[0] * cr_h;
+      mv_size = info->size / 3;
+      info->size += mv_size;
+      break;
+    case GST_VIDEO_FORMAT_NV16:
+      info->stride[0] = hor_stride;
+      info->stride[1] = hor_stride;
+      info->offset[0] = 0;
+
+      offs = hor_stride * ver_stride;
+      if (info->offset[1] != offs) {
+        *need_video_meta = TRUE;
+        info->offset[1] = offs;
+      }
+
+      cr_h = GST_ROUND_UP_2 (ver_stride);
       info->size = info->offset[1] + info->stride[0] * cr_h;
       mv_size = info->size / 3;
       info->size += mv_size;
@@ -295,9 +321,15 @@ gst_mpp_object_unlock_stop (GstMppObject * self)
 gboolean
 gst_mpp_object_destroy (GstMppObject * self)
 {
-
   g_return_val_if_fail (self != NULL, FALSE);
   gst_mpp_object_close_pool (self);
+
+  if (self->type == GST_MPP_DEC_OUTPUT) {
+    GST_MPP_SET_INACTIVE (self);
+    g_free (self);
+
+    return TRUE;
+  }
 
   if (self->mpp_ctx && self->element) {
     mpp_destroy (self->mpp_ctx);
@@ -331,9 +363,6 @@ gst_mpp_object_new (GstElement * element, gboolean is_encoder)
       /* FIXME */
       self->req_mode = GST_MPP_IO_RW;
       break;
-    case GST_MPP_DEC_OUTPUT:
-      self->need_video_meta = TRUE;
-      break;
     default:
       self->req_mode = GST_MPP_IO_AUTO;
       break;
@@ -343,6 +372,7 @@ gst_mpp_object_new (GstElement * element, gboolean is_encoder)
   self->mpi = NULL;
   self->active = FALSE;
   self->pool = NULL;
+  self->need_video_meta = FALSE;
 
   return self;
 }
@@ -359,8 +389,9 @@ gst_mpp_object_open_shared (GstMppObject * self, GstMppObject * other)
   self->mpp_ctx = other->mpp_ctx;
   self->mpi = other->mpi;
   self->type = GST_MPP_DEC_OUTPUT;
-  self->need_video_meta = TRUE;
-  self->req_mode = GST_MPP_IO_AUTO;
+  /* FIXME */
+  if (self->req_mode == GST_MPP_IO_RW)
+    self->req_mode = GST_MPP_IO_AUTO;
 
   return self;
 }
@@ -441,7 +472,8 @@ gst_mpp_object_acquire_output_format (GstMppObject * self)
       return GST_MPP_ERROR;
     }
 
-    if (gst_mpp_video_frame_to_info (frame, &self->info, &self->align_info))
+    if (gst_mpp_video_frame_to_info (frame, &self->info, &self->need_video_meta,
+            &self->align_info))
       return GST_MPP_OK;
   }
   return GST_MPP_ERROR;
@@ -524,6 +556,8 @@ gst_mpp_object_setup_pool (GstMppObject * self, GstCaps * caps)
       break;
     case GST_MPP_DEC_OUTPUT:
       self->pool = gst_mpp_buffer_pool_new (self, caps);
+      /* FIXME get the minimum buffers requested from decoder parser */
+      self->min_buffers = 16;
       break;
     default:
       return FALSE;
@@ -599,11 +633,7 @@ gst_mpp_object_decide_allocation (GstMppObject * obj, GstQuery * query)
 
   GST_DEBUG_OBJECT (obj->element, "decide allocation");
 
-#if 0
-  /* FIXME */
-  g_return_val_if_fail (obj->type == V4L2_BUF_TYPE_VIDEO_CAPTURE ||
-      obj->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, FALSE);
-#endif
+  g_return_val_if_fail (obj->type == GST_MPP_DEC_OUTPUT, FALSE);
 
   gst_query_parse_allocation (query, &caps, NULL);
 
@@ -640,7 +670,6 @@ gst_mpp_object_decide_allocation (GstMppObject * obj, GstQuery * query)
        * our own, so it can serve itself */
       if (pool == NULL)
         goto no_downstream_pool;
-      /* TODO */
       gst_mpp_buffer_pool_set_other_pool (GST_MPP_BUFFER_POOL (obj->pool),
           pool);
       other_pool = pool;
@@ -667,9 +696,11 @@ gst_mpp_object_decide_allocation (GstMppObject * obj, GstQuery * query)
             "streaming mode: copying to downstream pool %" GST_PTR_FORMAT,
             pool);
       } else {
-        GST_DEBUG_OBJECT (obj->element,
-            "streaming mode: no usable pool, copying to generic pool");
         size = MAX (size, obj->info.size);
+        pool = gst_object_ref (obj->pool);
+        GST_DEBUG_OBJECT (obj->element,
+            "streaming mode: anyway using our own pool %" GST_PTR_FORMAT, pool);
+        pushing_from_our_pool = TRUE;
       }
       break;
     case GST_MPP_IO_AUTO:
@@ -690,7 +721,7 @@ gst_mpp_object_decide_allocation (GstMppObject * obj, GstQuery * query)
      * driver and 2 more, so we don't endup up with everything downstream or
      * held by the decoder.
      */
-    own_min = min + 2;
+    own_min = min + obj->min_buffers + 2;
 
     /* If no allocation parameters where provided, allow for a little more
      * buffers and enable copy threshold */
@@ -710,6 +741,7 @@ gst_mpp_object_decide_allocation (GstMppObject * obj, GstQuery * query)
   } else {
     /* In this case we'll have to configure two buffer pool. For our buffer
      * pool, we'll need what the driver one, and one more, so we can dequeu */
+    own_min = obj->min_buffers + 1;
     own_min = MAX (own_min, GST_MPP_MIN_BUFFERS);
 
     /* for the downstream pool, we keep what downstream wants, though ensure
