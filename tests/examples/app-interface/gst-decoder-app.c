@@ -286,9 +286,9 @@ buffer_to_file (struct decoder *dec, GstBuffer * buf)
    * block might get merged below by gst_buffer_map(), meaning
    * that the mem pointer would become invalid */
   mem = gst_buffer_peek_memory (buf, 0);
-
+  /* gst_is_dmabuf_memory (mem); */
   /* TODO: use the DMABUF directly */
-
+  /* fd = gst_dmabuf_memory_get_fd (mem); */
   gst_buffer_map (buf, &map_info, GST_MAP_READ);
 
   /* Usually, a videometa should be present, since by using the internal kmscube
